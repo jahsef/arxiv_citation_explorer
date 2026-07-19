@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>visualize · arxiv research tool</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<nav>
+  <span class="brand">arxiv research tool</span>
+  <a href="index.html">home</a>
+  <a href="scrape.html">scrape</a>
+  <a href="vis.html">visualize</a>
+  <span class="spacer"></span>
+  <label style="color:#79828f; display:flex; gap:6px; align-items:center"
+         title="how many citation hops out to pull in — everything is still compared to the base paper">
+    depth
+    <input id="depth" type="number" value="1" min="1" max="4" style="width:52px">
+  </label>
+  <label style="color:#79828f; display:flex; gap:6px; align-items:center">
+    min citations
+    <input id="minCitations" type="number" value="0" min="0" style="width:70px">
+  </label>
+  <label style="color:#79828f; display:flex; gap:6px; align-items:center">
+    years
+    <input id="minYear" type="number" placeholder="from" style="width:64px">
+    <input id="maxYear" type="number" placeholder="to" style="width:64px">
+  </label>
+  <label id="couplingCtl" style="color:#79828f; display:flex; gap:6px; align-items:center"
+         title="drop candidates whose absolute bibliographic coupling is below this — cuts noise">
+    min coupling
+    <input id="minCoupling" type="number" value="0" min="0" max="1" step="0.02" style="width:60px">
+  </label>
+  <select id="viewmode">
+    <option value="scatter">scatter</option>
+    <option value="graph">citation graph</option>
+  </select>
+  <span id="status"></span>
+</nav>
+
+<div id="title">no paper selected — search on the left</div>
+<div id="axishint" class="muted" style="padding:2px 12px 6px; font-size:11px"></div>
+
+<main>
+  <div id="sidebar">
+    <div class="controls">
+      <input id="q" placeholder="search…" style="flex:1; min-width:0">
+      <select id="mode">
+        <option value="sim">semantic</option>
+        <option value="fts">keyword</option>
+        <option value="id">id lookup</option>
+      </select>
+    </div>
+    <div id="hits"><div class="empty">search to begin</div></div>
+  </div>
+  <div id="view"></div>
+</main>
+
+<script src="common.js"></script>
+<script src="vis.js"></script>
+</body>
+</html>

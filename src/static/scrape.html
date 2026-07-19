@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>scrape · arxiv research tool</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .dirbox { border: 1px solid #2a2f38; border-radius: 4px; padding: 12px; margin-bottom: 14px; }
+  .dirbox h3 { margin: 0 0 4px; font-size: 13px; color: #e8ecf2; }
+  .dirbox .tag { color: #79828f; font-weight: normal; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  #queue { max-height: 320px; overflow-y: auto; border: 1px solid #2a2f38; border-radius: 4px; }
+  .job { padding: 8px 10px; border-bottom: 1px solid #21252c; }
+  .job:last-child { border-bottom: none; }
+  .job .top { display: flex; gap: 8px; align-items: baseline; }
+  .job .id { color: #5f6874; }
+  .job .st { font-size: 11px; padding: 1px 6px; border-radius: 8px; }
+  .st.queued  { background: #262b34; color: #9aa3b0; }
+  .st.running { background: #2d3f52; color: #7fb2e5; }
+  .st.done    { background: #29402f; color: #7fc48d; }
+  .st.failed  { background: #4a2a2a; color: #e08a8a; }
+  .job .args, .job .prog { color: #79828f; font-size: 11px; }
+  .job .err { color: #e08a8a; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="brand">arxiv research tool</span>
+  <a href="index.html">home</a>
+  <a href="scrape.html">scrape</a>
+  <a href="vis.html">visualize</a>
+  <span class="spacer"></span>
+  <span id="status"></span>
+</nav>
+
+<div class="page narrow">
+  <h1>scrape</h1>
+  <p class="muted" style="margin-top:0">
+    Walks outward from a seed paper via Semantic Scholar. Jobs run one at a time on a
+    background thread — the rest of the app stays responsive while one is running.
+  </p>
+
+  <div class="field">
+    <label for="seed">seed arxiv id</label>
+    <input id="seed" placeholder="1706.03762" style="width:100%">
+  </div>
+
+  <div class="field">
+    <label for="depth">
+      recursive references depth
+      <span class="hint">— hops of neighbors to expand</span>
+    </label>
+    <input id="depth" type="number" value="1" min="0" max="3" style="width:100%">
+    <p class="muted" style="margin-top:6px">
+      Depth 0 gives the citation graph; 1 is needed for the scatter, which requires the
+      sub-papers' own references to build our 'citation score' from, otherwise no bibliographic coupling score can be computed.
+      Each extra hop costs roughly 40× the requests.
+    </p>
+  </div>
+
+  <div class="dirbox">
+    <h3>backward · references — the recursive crawl</h3>
+    <p class="muted" style="margin:0 0 10px">
+      References are always stored <b>in full</b> — coupling needs complete reference lists
+      on both sides, so this never filters them. The threshold below bounds crawl
+      <b>breadth</b>: only papers with at least this many citations get expanded (their own
+      references fetched). <b>0</b> expands everything; raise it to keep a deep crawl
+      converging on foundational papers instead of exploding into thousands of low-cite ones.
+    </p>
+    <div class="row">
+      <div>
+        <label for="refMinCites">min citations to expand <span class="hint">— crawl breadth, not a reference filter</span></label>
+        <input id="refMinCites" type="number" value="0" min="0" style="width:100%">
+      </div>
+    </div>
+  </div>
+
+  <div class="dirbox">
+    <h3>forward · citations</h3>
+    <p class="muted" style="margin:0 0 10px">
+      Citers = papers that <b>cite the seed</b> (references, above, are papers the seed cites).
+      Fetched for the <b>seed only</b>, not during the recursive crawl. S2 returns newest first,
+      capped by max records and thresholded by the citer's own citation count.
+    </p>
+    <div class="row">
+      <div>
+        <label for="maxCiters">max records</label>
+        <input id="maxCiters" type="number" value="1000" min="1" style="width:100%">
+      </div>
+      <div>
+        <label for="minCites">min citations <span class="hint">— of the citing paper</span></label>
+        <input id="minCites" type="number" value="0" min="0" style="width:100%">
+      </div>
+    </div>
+    <label style="margin-top:12px; display:flex; gap:7px; align-items:center; cursor:pointer">
+      <input id="recs" type="checkbox" style="width:auto">
+      add S2-recommended papers to the corpus
+      <span class="hint">— seed only, no edges, just topically-related papers for search</span>
+    </label>
+    <div class="row" style="margin-top:8px">
+      <div>
+        <label for="recLimit">recommendations limit <span class="hint">— max 500</span></label>
+        <input id="recLimit" type="number" value="500" min="1" max="500" style="width:100%">
+      </div>
+    </div>
+    <label style="margin-top:12px; display:flex; gap:7px; align-items:center; cursor:pointer">
+      <input id="expandRecs" type="checkbox" style="width:auto">
+      query recommended papers' references
+      <span class="hint">— 1 hop only (each rec's own refs, not recursive). builds a more complete graph. recommended</span>
+    </label>
+  </div>
+
+  <button id="run">queue scrape</button>
+
+  <h1 style="margin-top:26px">queue</h1>
+  <div id="queue"><div class="empty">no jobs yet</div></div>
+</div>
+
+<script src="common.js"></script>
+<script>
+function elapsed(job) {
+  if (!job.started_at) return '';
+  const end = job.finished_at || (Date.now() / 1000);
+  return ` · ${(end - job.started_at).toFixed(0)}s`;
+}
+
+function renderJobs(jobs) {
+  const box = $('queue');
+  if (!jobs.length) {
+    box.innerHTML = '<div class="empty">no jobs yet</div>';
+    return;
+  }
+  box.innerHTML = '';
+  for (const job of jobs) {
+    const div = document.createElement('div');
+    div.className = 'job';
+
+    let detail = '';
+    if (job.state === 'running' && job.progress) {
+      const p = job.progress;
+      const label = p.phase ? p.phase : `hop ${p.hop}/${p.of}`;
+      detail = `<div class="prog">${label} · ` +
+               `expanding ${p.expanded}/${p.of_frontier}</div>`;
+    } else if (job.state === 'done' && job.result) {
+      const r = job.result;
+      detail = `<div class="prog">${r.papers.toLocaleString()} papers · ` +
+               `${r.expanded} expanded · ${r.vectors.toLocaleString()} vectors` +
+               (job.paper_id
+                 ? ` · <a href="vis.html?paper_id=${job.paper_id}">visualize →</a>`
+                 : '') + `</div>`;
+    } else if (job.state === 'failed') {
+      detail = `<div class="err">${job.error}</div>`;
+    }
+
+    div.innerHTML =
+      `<div class="top">` +
+        `<span class="id">#${job.id}</span>` +
+        `<b>${job.arxiv_id}</b>` +
+        `<span class="st ${job.state}">${job.state}</span>` +
+        `<span class="args">depth ${job.depth}${elapsed(job)}</span>` +
+      `</div>` +
+      `<div class="args">ref min-cites ${job.ref_min_citations} · ` +
+      `citing max ${job.max_citers}/min ${job.citer_min_citations}</div>` +
+      detail;
+    box.appendChild(div);
+  }
+}
+
+async function poll() {
+  try {
+    renderJobs((await api('/api/jobs')).jobs);
+  } catch (err) {
+    status(err.message);
+  }
+}
+
+async function queueJob() {
+  const arxivId = $('seed').value.trim();
+  if (!arxivId) { status('enter an arxiv id'); return; }
+  try {
+    const data = await api('/api/scrape', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        arxiv_id: arxivId,
+        depth: Number($('depth').value),
+        max_citers: Number($('maxCiters').value),
+        citer_min_citations: Number($('minCites').value),
+        ref_min_citations: Number($('refMinCites').value),
+        add_recommendations: $('recs').checked,
+        rec_limit: Number($('recLimit').value),
+        expand_recommendations: $('expandRecs').checked,
+      }),
+    });
+    status(`queued job #${data.job_id}`);
+    poll();
+  } catch (err) {
+    status(err.message);
+  }
+}
+
+$('run').onclick = queueJob;
+$('seed').onkeydown = (e) => { if (e.key === 'Enter') queueJob(); };
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

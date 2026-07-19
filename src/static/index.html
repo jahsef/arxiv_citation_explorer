@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>arxiv research tool</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<nav>
+  <span class="brand">arxiv research tool</span>
+  <a href="index.html">home</a>
+  <a href="scrape.html">scrape</a>
+  <a href="vis.html">visualize</a>
+  <span class="spacer"></span>
+  <span id="status"></span>
+</nav>
+
+<div class="page narrow">
+  <h1>corpus</h1>
+  <div class="stats" id="stats"><span class="muted">loading…</span></div>
+
+  <div class="card">
+    <h2><a href="scrape.html">scrape →</a></h2>
+    <p>Pull a citation neighborhood from Semantic Scholar into the local database.
+       Start here if the corpus is empty.</p>
+  </div>
+
+  <div class="card">
+    <h2><a href="vis.html">visualize →</a></h2>
+    <p>Search the corpus or look up an id, then plot a paper's citation graph or its
+       builds-on × semantic-similarity scatter.</p>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+async function loadStats() {
+  try {
+    const s = await api('/api/stats');
+    $('stats').innerHTML = [
+      ['papers', s.papers], ['expanded', s.expanded],
+      ['citations', s.citations], ['vectors', s.vectors],
+    ].map(([k, n]) =>
+      `<div class="stat"><div class="n">${n.toLocaleString()}</div><div class="k">${k}</div></div>`
+    ).join('');
+  } catch (err) {
+    $('stats').innerHTML = `<span class="muted">${err.message}</span>`;
+  }
+}
+
+loadStats();
+</script>
+</body>
+</html>
