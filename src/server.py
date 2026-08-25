@@ -120,24 +120,32 @@ def resolve(arxiv_id: str):
     return {'paper_id': paper_id, 'arxiv_id': arxiv_id}
 
 
+# Effectively "no upper bound" - no paper has this many citations.
+MAX_CITATIONS = 1_000_000_000
+
+
 @app.get('/api/graph/{paper_id}')
 def graph(paper_id: str, back_depth: int = 1, fwd_depth: int = 1, top_k: int = 10,
-          min_citations: int = 0, min_year: int = 0, max_year: int = 9999):
+          min_citations: int = 0, max_citations: int = MAX_CITATIONS,
+          min_year: int = 0, max_year: int = 9999):
     payload = metrics.build_graph(
         STATE['conn'], paper_id, back_depth, fwd_depth, top_k, min_citations,
-        min_year, max_year)
+        max_citations, min_year, max_year)
     if payload is None:
         raise HTTPException(404, f'unknown paper: {paper_id}')
     return payload
 
 
 @app.get('/api/scatter/{paper_id}')
-def scatter(paper_id: str, depth: int = 1, min_coupling: float = 0.0,
-            min_sim: float = 0.0, min_citations: int = 0,
-            min_year: int = 0, max_year: int = 9999):
+def scatter(paper_id: str, depth: int = 1, min_x: float = 0.0,
+            min_y: float = 0.0, min_citations: int = 0,
+            max_citations: int = MAX_CITATIONS, min_year: int = 0, max_year: int = 9999,
+            y_metric: str = 'sim'):
+    if y_metric not in ('sim', 'cocitation'):
+        raise HTTPException(400, "y_metric must be 'sim' or 'cocitation'")
     payload = metrics.build_scatter(
-        STATE['conn'], STATE['store'], paper_id, depth, min_coupling, min_sim,
-        min_citations, min_year, max_year)
+        STATE['conn'], STATE['store'], paper_id, depth, min_x, min_y,
+        min_citations, max_citations, min_year, max_year, y_metric)
     if payload is None:
         raise HTTPException(404, f'unknown paper: {paper_id}')
     return payload

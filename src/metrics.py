@@ -5,18 +5,6 @@ import math
 from src import db
 
 
-def _year_ok(published, min_year, max_year):
-    """Whether a paper's publication year falls in [min_year, max_year]. An unknown year
-    passes - a year filter should not silently drop papers whose date S2 didn't provide."""
-    if not published:
-        return True
-    try:
-        year = int(published[:4])
-    except (ValueError, TypeError):
-        return True
-    return min_year <= year <= max_year
-
-
 def coupling(refs_a, refs_b):
     """Cosine-normalized bibliographic coupling (Kessler 1963).
 
@@ -46,45 +34,56 @@ def _direction(candidate_id, target_cites, target_cited_by, target_published,
     return 1.0, 'newer'
 
 
-def build_scatter(conn, store, target_id, depth, min_coupling, min_sim, min_citations,
-                  min_year, max_year):
-    """x = signed coupling, y = semantic similarity.
+def build_scatter(conn, store, target_id, depth, min_x, min_y, min_citations,
+                  max_citations, min_year, max_year, y_metric='sim'):
+    """x = signed bibliographic coupling (shared references, backward).
+    y = semantic similarity ('sim') or co-citation ('cocitation', shared citers, forward).
 
-    Candidates are restricted to expanded papers. An unexpanded paper has no references
-    of its own, so it would couple 0.0 and the plot would collapse onto the y axis.
+    Candidates are restricted to expanded papers - the x axis (coupling) needs each
+    candidate's own references, which only expanded papers have.
     """
     target = db.get_paper(conn, target_id)
     if target is None:
         return None
 
-    candidates = db.neighborhood(conn, target_id, depth) & db.expanded_ids(conn)
-    if not candidates:
-        return {'target': target, 'points': []}
+    # neighbourhood via recursive CTE; expanded/citation/year filtering in SQL, so the
+    # metrics only run on the survivors.
+    neighbourhood = db.neighborhood(conn, target_id, depth)
+    rows = db.scatter_candidates(
+        conn, neighbourhood, min_citations, max_citations, min_year, max_year)
+    if not rows:
+        return {'target': target, 'points': [], 'candidates': 0,
+                'dropped_no_abstract': 0, 'y_metric': y_metric}
 
+    candidates = list(rows.keys())
     target_refs = db.refs_of(conn, target_id)
     target_cited_by = db.citers_of(conn, target_id)
     candidate_refs = db.refs_of_many(conn, candidates)
-    similarities = store.similarity_to(target_id, candidates)
-    rows = db.get_papers(conn, candidates)
+
+    # y-axis source: cosine of abstracts, or co-citation (cosine-normalized shared citers).
+    if y_metric == 'cocitation':
+        candidate_citers = db.citers_of_many(conn, candidates)
+    else:
+        similarities = store.similarity_to(target_id, candidates)
 
     points = []
     no_vector = 0
     for candidate_id in candidates:
         row = rows[candidate_id]
+
+        if y_metric == 'cocitation':
+            y = coupling(target_cited_by, candidate_citers[candidate_id])
+        else:
+            y = similarities[candidate_id]
+            if y is None:
+                # No abstract, so no position on the similarity axis. Dropped rather than
+                # pinned to 0.0, which would read as "unrelated". (Not hit for co-citation.)
+                no_vector += 1
+                continue
+
         strength = coupling(target_refs, candidate_refs[candidate_id])
-        similarity = similarities[candidate_id]
-
-        if similarity is None:
-            # No abstract, so no position on the similarity axis at all. Dropped rather
-            # than pinned to 0.0, which would read as "unrelated".
-            no_vector += 1
-            continue
-
-        if strength < min_coupling or similarity < min_sim:
-            continue
-        if (row['citation_count'] or 0) < min_citations:
-            continue
-        if not _year_ok(row['published'], min_year, max_year):
+        # Axis-agnostic noise cut: |x| (coupling magnitude, both signs) and y value.
+        if strength < min_x or y < min_y:
             continue
 
         sign, direction = _direction(
@@ -99,7 +98,7 @@ def build_scatter(conn, store, target_id, depth, min_coupling, min_sim, min_cita
             'published': row['published'],
             'citation_count': row['citation_count'],
             'x': sign * strength,
-            'y': similarity,
+            'y': y,
             'coupling': strength,
             'direction': direction,
         })
@@ -110,21 +109,18 @@ def build_scatter(conn, store, target_id, depth, min_coupling, min_sim, min_cita
         'points': points,
         'candidates': len(candidates),
         'dropped_no_abstract': no_vector,
+        'y_metric': y_metric,
     }
 
 
-def _prune(rows, top_k):
-    """Keep the top_k most-cited. Papers with no citation count sort last."""
-    ranked = sorted(rows, key=lambda r: -(r['citation_count'] or 0))
-    return ranked[:top_k]
-
-
-def _walk(conn, target_id, depth, top_k, min_citations, min_year, max_year, forward):
+def _walk(conn, target_id, depth, top_k, min_citations, max_citations, min_year, max_year,
+          forward):
     """One direction of the citation graph, pruned to top_k per level.
 
     forward=True follows papers citing the frontier; forward=False follows papers the
-    frontier cites. Nodes below min_citations are dropped before pruning, so the top_k
-    is chosen from papers that clear the floor.
+    frontier cites. The citation/year filter and the top_k selection run in SQL
+    (db.top_papers); only the traversal bookkeeping stays in Python. The frontier is at
+    most top_k wide each level, so building `step` is a handful of indexed lookups.
     """
     nodes = {}
     edges = []
@@ -142,12 +138,8 @@ def _walk(conn, target_id, depth, top_k, min_citations, min_year, max_year, forw
         if not step:
             break
 
-        eligible = [
-            row for row in db.get_papers(conn, step.keys()).values()
-            if (row['citation_count'] or 0) >= min_citations
-            and _year_ok(row['published'], min_year, max_year)
-        ]
-        kept = _prune(eligible, top_k)
+        kept = db.top_papers(
+            conn, step.keys(), min_citations, max_citations, min_year, max_year, top_k)
         if not kept:
             break
 
@@ -166,7 +158,7 @@ def _walk(conn, target_id, depth, top_k, min_citations, min_year, max_year, forw
 
 
 def build_graph(conn, target_id, back_depth, fwd_depth, top_k, min_citations,
-                min_year, max_year):
+                max_citations, min_year, max_year):
     """Chronological citation graph. The x axis is publication date, so there is no
     layout pass - the frontend just stacks within a date column.
 
@@ -178,11 +170,11 @@ def build_graph(conn, target_id, back_depth, fwd_depth, top_k, min_citations,
         return None
 
     back_nodes, back_edges = _walk(
-        conn, target_id, back_depth, top_k, min_citations, min_year, max_year,
-        forward=False)
+        conn, target_id, back_depth, top_k, min_citations, max_citations, min_year,
+        max_year, forward=False)
     fwd_nodes, fwd_edges = _walk(
-        conn, target_id, fwd_depth, top_k, min_citations, min_year, max_year,
-        forward=True)
+        conn, target_id, fwd_depth, top_k, min_citations, max_citations, min_year,
+        max_year, forward=True)
 
     nodes = {**back_nodes, **fwd_nodes, target_id: target}
     edges = [{'from': a, 'to': b} for a, b in back_edges + fwd_edges]

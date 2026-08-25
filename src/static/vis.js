@@ -93,10 +93,11 @@ function renderScatter(data, width, height) {
   svg.appendChild(svgEl('text', {
     class: 'axis-tick', x: pad - 6, y: pad + 4, 'text-anchor': 'end',
   }, '1'));
+  const yLabel = data.y_metric === 'cocitation' ? 'co-citation' : 'semantic similarity';
   svg.appendChild(svgEl('text', {
     class: 'axis-label', x: 8, y: height / 2,
     transform: `rotate(-90 8 ${height / 2})`, 'text-anchor': 'middle',
-  }, 'semantic similarity'));
+  }, yLabel));
 
   for (const point of data.points) {
     const group = svgEl('g', { class: 'node' });
@@ -106,7 +107,9 @@ function renderScatter(data, width, height) {
     }));
     group.appendChild(svgEl('title', {},
       `${point.title}\n${point.published || '?'} · ${point.citation_count ?? 0} cites\n` +
-      `coupling ${point.coupling.toFixed(3)} · sim ${point.y.toFixed(3)} · ${point.direction}`));
+      `coupling ${point.coupling.toFixed(3)} · ` +
+      `${data.y_metric === 'cocitation' ? 'co-cite' : 'sim'} ${point.y.toFixed(3)} · ` +
+      `${point.direction}`));
     group.onclick = () => selectPaper(point.paper_id);
     svg.appendChild(group);
   }
@@ -257,27 +260,33 @@ async function draw() {
   const height = view.clientHeight || 600;
 
   const minCites = Number($('minCitations').value) || 0;
+  const maxCites = Number($('maxCitations').value) || 1000000000;  // blank = no upper limit
   const depth = Number($('depth').value) || 1;  // citation hops out from the base paper
-  const minCoupling = Number($('minCoupling').value) || 0;  // scatter-only noise filter
+  const minX = Number($('minX').value) || 0;  // scatter-only, axis-agnostic noise filters
+  const minY = Number($('minY').value) || 0;
   // Blank year -> the endpoint's own no-filter default (0 / 9999).
   const minYear = Number($('minYear').value) || 0;
   const maxYear = Number($('maxYear').value) || 9999;
   const yearQs = `&min_year=${minYear}&max_year=${maxYear}`;
-  const isScatter = $('viewmode').value === 'scatter';
-  // Coupling is a scatter axis only - hide the control on the graph.
-  $('couplingCtl').style.display = isScatter ? 'flex' : 'none';
-  $('axishint').textContent = isScatter
-    ? 'middle of x axis = low bib coupling, bottom of y axis = low abstract semantic sim'
-    : '';
+  const mode = $('viewmode').value;
+  const isScatter = mode === 'scatter' || mode === 'cocite';
+  const yMetric = mode === 'cocite' ? 'cocitation' : 'sim';
+  // The axis-min filters only apply to the scatter - hide them on the graph.
+  $('axisMinCtl').style.display = isScatter ? 'flex' : 'none';
+  $('axishint').textContent = !isScatter ? ''
+    : yMetric === 'cocitation'
+      ? 'x = bib coupling (shared references, past) · y = co-citation (shared citers, future); low = middle/bottom'
+      : 'middle of x axis = low bib coupling, bottom of y axis = low abstract semantic sim';
   status('loading…');
   try {
+    const citeQs = `&min_citations=${minCites}&max_citations=${maxCites}`;
     const svg = isScatter
       ? renderScatter(await api(
-          `/api/scatter/${currentPaper}?depth=${depth}&min_citations=${minCites}` +
-          `&min_coupling=${minCoupling}${yearQs}`), width, height)
+          `/api/scatter/${currentPaper}?depth=${depth}${citeQs}` +
+          `&min_x=${minX}&min_y=${minY}&y_metric=${yMetric}${yearQs}`), width, height)
       : renderGraph(await api(
           `/api/graph/${currentPaper}?back_depth=${depth}&fwd_depth=${depth}` +
-          `&min_citations=${minCites}${yearQs}`), width, height);
+          `${citeQs}${yearQs}`), width, height);
     view.innerHTML = '';
     view.appendChild(svg);
     status('');
@@ -343,8 +352,10 @@ $('q').onkeydown = (e) => { if (e.key === 'Enter') runSearch(); };
 $('mode').onchange = onModeChange;
 $('viewmode').onchange = draw;
 $('depth').onchange = draw;
-$('minCoupling').onchange = draw;
+$('minX').onchange = draw;
+$('minY').onchange = draw;
 $('minCitations').onchange = draw;
+$('maxCitations').onchange = draw;
 $('minYear').onchange = draw;
 $('maxYear').onchange = draw;
 window.onresize = draw;

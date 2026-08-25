@@ -1,5 +1,20 @@
 * { box-sizing: border-box; }
 
+/* Dark scrollbars to match the theme - the browser default is a light system bar. */
+* { scrollbar-width: thin; scrollbar-color: #333a45 #14161a; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #14161a; }
+::-webkit-scrollbar-thumb {
+  background: #2a2f38; border-radius: 5px; border: 2px solid #14161a;
+}
+::-webkit-scrollbar-thumb:hover { background: #3a414c; }
+::-webkit-scrollbar-corner { background: #14161a; }
+
+/* Drop the light native up/down spinners on number inputs (can't be recoloured). */
+input[type=number] { -moz-appearance: textfield; }
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
 body {
   margin: 0;
   font: 13px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;

@@ -46,18 +46,27 @@ class VectorStore:
         return [(self.ids[i], float(scores[i])) for i in top]
 
     def similarity_to(self, paper_id, candidate_ids):
-        """Cosine of `paper_id` against each candidate.
+        """Cosine of `paper_id` against each candidate, as one vectorized matmul.
 
         None (not 0.0) where a vector is missing - S2 withholds many abstracts, and
-        "unknown" must not be confused with "dissimilar". 0.0 would silently anchor the
-        low end of a min/max scaled axis.
+        "unknown" must not be confused with "dissimilar".
         """
         anchor = self.get(paper_id)
+        ids = list(candidate_ids)
         if anchor is None:
-            return {candidate_id: None for candidate_id in candidate_ids}
+            return {cid: None for cid in ids}
 
         out = {}
-        for candidate_id in candidate_ids:
-            vector = self.get(candidate_id)
-            out[candidate_id] = None if vector is None else float(vector @ anchor)
+        present, rows = [], []
+        for cid in ids:
+            idx = self._row_of.get(cid)
+            if idx is None:
+                out[cid] = None
+            else:
+                present.append(cid)
+                rows.append(idx)
+        if rows:
+            # Single (k, dim) @ (dim,) matmul instead of a Python loop of dot products.
+            sims = self.matrix[rows] @ anchor
+            out.update(zip(present, (float(s) for s in sims)))
         return out

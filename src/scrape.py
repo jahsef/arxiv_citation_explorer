@@ -85,7 +85,7 @@ def scrape(conn, client, model, seed_arxiv_id, depth, max_citers,
         # Expand the whole frontier - no cap. Crawl size is bounded by the caller's knobs
         # (depth, ref_min_citations). Most-cited first, so an interrupted crawl keeps the
         # important papers; already-expanded papers are skipped (resumability).
-        pending = _order_frontier(conn, level - expanded, ref_min_citations)
+        pending = db.frontier_candidates(conn, level - expanded, ref_min_citations)
         log.info(f'hop {hop}/{depth}: expanding {len(pending)} at this level')
 
         for i, paper_id in enumerate(pending, 1):
@@ -130,7 +130,8 @@ def _expand_references(conn, client, paper_id, tag):
     |target_refs INTERSECT candidate_refs| and needs complete reference lists on both sides;
     dropping references here zeroes out the coupling axis (a 2024 paper cites mostly
     low-cite recent work, so a high filter leaves it with no references at all). Crawl
-    breadth is bounded separately, by the frontier filter in _order_frontier.
+    breadth is bounded separately, by db.frontier_candidates (the citation floor on which
+    papers get expanded).
     """
     log.info(f'{tag} fetching references...')
     references = [s2.to_row(p) for p in client.get_references(paper_id)]
@@ -153,23 +154,6 @@ def _fetch_seed_citations(conn, client, paper_id, tag, max_citers, min_citations
     db.upsert_papers(conn, citations)
     db.insert_edges(conn, [(c['paper_id'], paper_id) for c in citations])
     return citations
-
-
-def _order_frontier(conn, candidate_ids, min_citations):
-    """Which papers to expand next: those at or above min_citations, most-cited first.
-
-    The citation floor gates the *crawl breadth*, not just what a fetch stores. Without it
-    the frontier is built from whatever edges already exist in the DB - including papers
-    dumped in by earlier runs at a lower (or zero) threshold - so a high min_citations
-    would still expand thousands of stale low-cite papers. Filtering here makes the current
-    setting actually bound the search space.
-    """
-    if not candidate_ids:
-        return []
-    rows = db.get_papers(conn, candidate_ids)
-    eligible = [r for r in rows.values() if (r['citation_count'] or 0) >= min_citations]
-    eligible.sort(key=lambda r: -(r['citation_count'] or 0))
-    return [r['paper_id'] for r in eligible]
 
 
 def embed_missing(conn, model, batch_size):

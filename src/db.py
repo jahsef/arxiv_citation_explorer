@@ -167,17 +167,31 @@ def papers_needing_vectors(conn):
     return [(r['paper_id'], r['abstract']) for r in rows]
 
 
+# SQLite caps bound parameters per statement (SQLITE_MAX_VARIABLE_NUMBER: 999 on old
+# builds). Any IN (?,?,...) over an unbounded id set must be chunked or a deep crawl's
+# frontier blows past it ("too many SQL variables").
+_MAX_VARS = 900
+
+
+def _chunk(seq, n=_MAX_VARS):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
 def existing_vector_ids(conn, paper_ids):
     """Which of `paper_ids` already have a vector. Lets the scraper embed only the papers
     a fetch newly introduced, without a full papers/vectors anti-join each time."""
     ids = list(paper_ids)
     if not ids:
         return set()
-    placeholders = ','.join('?' * len(ids))
-    rows = conn.execute(
-        f'SELECT paper_id FROM vectors WHERE paper_id IN ({placeholders})', ids
-    ).fetchall()
-    return {r['paper_id'] for r in rows}
+    found = set()
+    for chunk in _chunk(ids):
+        placeholders = ','.join('?' * len(chunk))
+        rows = conn.execute(
+            f'SELECT paper_id FROM vectors WHERE paper_id IN ({placeholders})', chunk
+        ).fetchall()
+        found.update(r['paper_id'] for r in rows)
+    return found
 
 
 def get_paper(conn, paper_id):
@@ -187,14 +201,18 @@ def get_paper(conn, paper_id):
 
 def get_papers(conn, paper_ids):
     """Returns {paper_id: row_dict} for the ids that exist."""
-    if not paper_ids:
-        return {}
     ids = list(paper_ids)
-    placeholders = ','.join('?' * len(ids))
-    rows = conn.execute(
-        f'SELECT * FROM papers WHERE paper_id IN ({placeholders})', ids
-    ).fetchall()
-    return {r['paper_id']: dict(r) for r in rows}
+    if not ids:
+        return {}
+    out = {}
+    for chunk in _chunk(ids):
+        placeholders = ','.join('?' * len(chunk))
+        rows = conn.execute(
+            f'SELECT * FROM papers WHERE paper_id IN ({placeholders})', chunk
+        ).fetchall()
+        for r in rows:
+            out[r['paper_id']] = dict(r)
+    return out
 
 
 def resolve_arxiv(conn, arxiv_id):
@@ -220,39 +238,151 @@ def citers_of(conn, paper_id):
     return {r['citing_id'] for r in rows}
 
 
+def frontier_candidates(conn, candidate_ids, min_citations):
+    """paper_ids at or above min_citations, most-cited first.
+
+    The citation floor is applied in SQL, so on a deep-crawl frontier (tens of thousands of
+    candidates, of which a handful clear a high threshold) only the eligible rows cross
+    into Python. Chunked for the bound-parameter cap; the small eligible set is merged and
+    sorted once at the end.
+    """
+    ids = list(candidate_ids)
+    if not ids:
+        return []
+    eligible = []
+    for chunk in _chunk(ids):
+        placeholders = ','.join('?' * len(chunk))
+        rows = conn.execute(
+            f'SELECT paper_id, citation_count FROM papers '
+            f'WHERE paper_id IN ({placeholders}) AND COALESCE(citation_count, 0) >= ?',
+            (*chunk, min_citations),
+        ).fetchall()
+        eligible.extend(rows)
+    eligible.sort(key=lambda r: -(r['citation_count'] or 0))
+    return [r['paper_id'] for r in eligible]
+
+
 def refs_of_many(conn, paper_ids):
-    """Returns {paper_id: set(cited_ids)} - one query for the whole candidate set."""
-    if not paper_ids:
-        return {}
+    """Returns {paper_id: set(cited_ids)} for the whole candidate set, chunked to stay
+    under SQLite's bound-parameter cap."""
     ids = list(paper_ids)
-    placeholders = ','.join('?' * len(ids))
-    rows = conn.execute(
-        f'SELECT citing_id, cited_id FROM citations WHERE citing_id IN ({placeholders})',
-        ids,
-    ).fetchall()
+    if not ids:
+        return {}
     out = {pid: set() for pid in ids}
-    for r in rows:
-        out[r['citing_id']].add(r['cited_id'])
+    for chunk in _chunk(ids):
+        placeholders = ','.join('?' * len(chunk))
+        rows = conn.execute(
+            f'SELECT citing_id, cited_id FROM citations '
+            f'WHERE citing_id IN ({placeholders})',
+            chunk,
+        ).fetchall()
+        for r in rows:
+            out[r['citing_id']].add(r['cited_id'])
     return out
 
 
+def citers_of_many(conn, paper_ids):
+    """Returns {paper_id: set(citer_ids)} - the papers citing each. Forward-edge dual of
+    refs_of_many (hits the cited_id index), for co-citation coupling."""
+    ids = list(paper_ids)
+    if not ids:
+        return {}
+    out = {pid: set() for pid in ids}
+    for chunk in _chunk(ids):
+        placeholders = ','.join('?' * len(chunk))
+        rows = conn.execute(
+            f'SELECT citing_id, cited_id FROM citations '
+            f'WHERE cited_id IN ({placeholders})',
+            chunk,
+        ).fetchall()
+        for r in rows:
+            out[r['cited_id']].add(r['citing_id'])
+    return out
+
+
+# Year filter as SQL, matching metrics._year_ok: an unknown/blank date always passes;
+# otherwise the leading 4 chars of `published` (YYYY or YYYY-MM-DD) must fall in range.
+_YEAR_SQL = (
+    "(published IS NULL OR published = '' "
+    "OR CAST(substr(published, 1, 4) AS INTEGER) BETWEEN ? AND ?)"
+)
+
+
 def neighborhood(conn, paper_id, depth):
-    """BFS `depth` hops over citation edges in both directions. Excludes the seed."""
-    seen = {paper_id}
-    frontier = {paper_id}
-    for _ in range(depth):
-        nxt = set()
-        for pid in frontier:
-            nxt |= refs_of(conn, pid)
-            nxt |= citers_of(conn, pid)
-        frontier = nxt - seen
-        seen |= frontier
-        if not frontier:
-            break
-    return seen - {paper_id}
+    """All papers within `depth` citation hops in either direction, excluding the seed.
+
+    One recursive CTE instead of a Python BFS that issued two queries per node. UNION
+    dedups, so cycles terminate; the depth guard bounds the walk.
+    """
+    rows = conn.execute(
+        """
+        WITH RECURSIVE nb(id, d) AS (
+            SELECT ?, 0
+            UNION
+            SELECT c.cited_id, nb.d + 1 FROM citations c JOIN nb ON c.citing_id = nb.id
+                WHERE nb.d < ?
+            UNION
+            SELECT c.citing_id, nb.d + 1 FROM citations c JOIN nb ON c.cited_id = nb.id
+                WHERE nb.d < ?
+        )
+        SELECT DISTINCT id FROM nb WHERE id != ?
+        """,
+        (paper_id, depth, depth, paper_id),
+    ).fetchall()
+    return {r['id'] for r in rows}
+
+
+def top_papers(conn, candidate_ids, min_citations, max_citations, min_year, max_year,
+               limit):
+    """Top `limit` candidates by citation count, filtered by the citation band and year in
+    SQL. Full row dicts. For the graph walk's per-level pruning - only the survivors cross
+    into Python."""
+    ids = list(candidate_ids)
+    if not ids:
+        return []
+    collected = []
+    for chunk in _chunk(ids):
+        placeholders = ','.join('?' * len(chunk))
+        rows = conn.execute(
+            f'SELECT * FROM papers WHERE paper_id IN ({placeholders}) '
+            f'AND COALESCE(citation_count, 0) BETWEEN ? AND ? AND {_YEAR_SQL}',
+            (*chunk, min_citations, max_citations, min_year, max_year),
+        ).fetchall()
+        collected.extend(dict(r) for r in rows)
+    collected.sort(key=lambda r: -(r['citation_count'] or 0))
+    return collected[:limit]
+
+
+def scatter_candidates(conn, candidate_ids, min_citations, max_citations, min_year,
+                       max_year):
+    """Expanded candidates within the citation band and year window, as {paper_id: row},
+    in SQL. Filtering the neighbourhood here means coupling/cosine only run on survivors."""
+    ids = list(candidate_ids)
+    if not ids:
+        return {}
+    out = {}
+    for chunk in _chunk(ids):
+        placeholders = ','.join('?' * len(chunk))
+        rows = conn.execute(
+            f'SELECT * FROM papers WHERE paper_id IN ({placeholders}) '
+            f'AND expanded = 1 AND COALESCE(citation_count, 0) BETWEEN ? AND ? '
+            f'AND {_YEAR_SQL}',
+            (*chunk, min_citations, max_citations, min_year, max_year),
+        ).fetchall()
+        for r in rows:
+            out[r['paper_id']] = dict(r)
+    return out
+
+
+def _fts_query(text):
+    # Quote each token so FTS5 reads punctuation literally instead of as operators.
+    return ' '.join('"' + token.replace('"', '""') + '"' for token in text.split())
 
 
 def search_fts(conn, query, limit):
+    match = _fts_query(query)
+    if not match:
+        return []
     rows = conn.execute(
         """
         SELECT p.*, papers_fts.rank AS rank
@@ -262,7 +392,7 @@ def search_fts(conn, query, limit):
         ORDER BY papers_fts.rank
         LIMIT ?
         """,
-        (query, limit),
+        (match, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 

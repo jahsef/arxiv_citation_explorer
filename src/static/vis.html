@@ -18,22 +18,26 @@
     depth
     <input id="depth" type="number" value="1" min="1" max="4" style="width:52px">
   </label>
-  <label style="color:#79828f; display:flex; gap:6px; align-items:center">
-    min citations
-    <input id="minCitations" type="number" value="0" min="0" style="width:70px">
+  <label style="color:#79828f; display:flex; gap:6px; align-items:center"
+         title="citation band — max blank = no upper limit; set it to hide the famous anchors">
+    citations
+    <input id="minCitations" type="number" value="0" min="0" placeholder="min" style="width:64px">
+    <input id="maxCitations" type="number" min="0" placeholder="max" style="width:64px">
   </label>
   <label style="color:#79828f; display:flex; gap:6px; align-items:center">
     years
     <input id="minYear" type="number" placeholder="from" style="width:64px">
     <input id="maxYear" type="number" placeholder="to" style="width:64px">
   </label>
-  <label id="couplingCtl" style="color:#79828f; display:flex; gap:6px; align-items:center"
-         title="drop candidates whose absolute bibliographic coupling is below this — cuts noise">
-    min coupling
-    <input id="minCoupling" type="number" value="0" min="0" max="1" step="0.02" style="width:60px">
+  <label id="axisMinCtl" style="color:#79828f; display:flex; gap:6px; align-items:center"
+         title="drop candidates below these on each axis — cuts near-origin noise (x = coupling magnitude, y = the y-axis metric)">
+    min x/y
+    <input id="minX" type="number" value="0" min="0" max="1" step="0.02" placeholder="x" style="width:52px">
+    <input id="minY" type="number" value="0" min="0" max="1" step="0.02" placeholder="y" style="width:52px">
   </label>
   <select id="viewmode">
-    <option value="scatter">scatter</option>
+    <option value="scatter">scatter · semantic</option>
+    <option value="cocite">scatter · co-citation</option>
     <option value="graph">citation graph</option>
   </select>
   <span id="status"></span>
